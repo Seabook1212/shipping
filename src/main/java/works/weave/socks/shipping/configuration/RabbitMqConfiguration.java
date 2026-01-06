@@ -1,5 +1,8 @@
 package works.weave.socks.shipping.configuration;
 
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
+import io.micrometer.tracing.TraceContext;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
@@ -7,10 +10,10 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-
 
 @Configuration
 public class RabbitMqConfiguration {
@@ -19,6 +22,9 @@ public class RabbitMqConfiguration {
 
     @Value("${spring.rabbitmq.host}")
     private String host;
+
+    @Autowired
+    private Tracer tracer;
 
     @Bean
     public ConnectionFactory connectionFactory() {
@@ -44,6 +50,25 @@ public class RabbitMqConfiguration {
     public RabbitTemplate rabbitTemplate() {
         RabbitTemplate template = new RabbitTemplate(connectionFactory());
         template.setMessageConverter(jsonMessageConverter());
+
+        // Micrometer Tracing: publish 前把当前 span 的 trace 信息写到 RabbitMQ headers
+        template.setBeforePublishPostProcessors(new MessagePostProcessor() {
+            @Override
+            public Message postProcessMessage(Message message) {
+                Span current = tracer.currentSpan();
+                if (current != null) {
+                    TraceContext context = current.context();
+                    String traceId = context.traceId();
+                    String spanId = context.spanId();
+
+                    message.getMessageProperties().setHeader("X-B3-TraceId", traceId);
+                    message.getMessageProperties().setHeader("X-B3-SpanId", spanId);
+                    message.getMessageProperties().setHeader("X-B3-Sampled", "1");
+                }
+                return message;
+            }
+        });
+
         return template;
     }
 
