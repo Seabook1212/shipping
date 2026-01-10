@@ -3,6 +3,9 @@ package works.weave.socks.shipping.controllers;
 import com.rabbitmq.client.Channel;
 import io.micrometer.tracing.Span;
 import io.micrometer.tracing.Tracer;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.rabbit.core.ChannelCallback;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -21,6 +24,8 @@ import java.util.Map;
 
 @RestController
 public class ShippingController {
+
+    private final Logger logger = LoggerFactory.getLogger(this.getClass());
 
     @Autowired
     RabbitTemplate rabbitTemplate;
@@ -44,7 +49,7 @@ public class ShippingController {
         // 创建一个专门的 producer span (Micrometer Tracing)
         Span producerSpan = tracer.nextSpan().name("rabbitmq:publish shipping-task");
 
-        System.out.println("Adding shipment to queue...");
+        logger.info("Adding shipment to queue...");
         try (Tracer.SpanInScope ws = tracer.withSpan(producerSpan.start())) {
             // 给 span 加一些 tag，后续你做 dataset 很有用
             producerSpan.tag("messaging.system", "rabbitmq");
@@ -53,8 +58,8 @@ public class ShippingController {
 
             rabbitTemplate.convertAndSend("shipping-task", shipment);
         } catch (Exception e) {
-            System.out.println("Unable to add to queue (the queue is probably down). Accepting anyway. Don't do this " +
-                    "for real!");
+            logger.error("Unable to add to queue (the queue is probably down). Accepting anyway. Don't do this " +
+                    "for real!", e);
             producerSpan.error(e);
         } finally {
             producerSpan.end();
