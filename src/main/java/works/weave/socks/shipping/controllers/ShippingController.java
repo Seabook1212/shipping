@@ -47,14 +47,16 @@ public class ShippingController {
     @RequestMapping(value = "/shipping", method = RequestMethod.POST)
     public @ResponseBody Shipment postShipping(@RequestBody Shipment shipment) {
         // 创建一个专门的 producer span (Micrometer Tracing)
-        Span producerSpan = tracer.nextSpan().name("rabbitmq:publish shipping-task");
+        Span producerSpan = tracer.spanBuilder()
+                .name("rabbitmq:publish shipping-task")
+                .kind(Span.Kind.PRODUCER)
+                .start();
 
         logger.info("Adding shipment to queue...");
-        try (Tracer.SpanInScope ws = tracer.withSpan(producerSpan.start())) {
+        try (Tracer.SpanInScope ws = tracer.withSpan(producerSpan)) {
             // 给 span 加一些 tag，后续你做 dataset 很有用
             producerSpan.tag("messaging.system", "rabbitmq");
             producerSpan.tag("messaging.destination", "shipping-task");
-            producerSpan.tag("span.kind", "producer");
 
             rabbitTemplate.convertAndSend("shipping-task", shipment);
         } catch (Exception e) {
