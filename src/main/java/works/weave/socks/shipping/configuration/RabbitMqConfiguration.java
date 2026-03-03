@@ -3,6 +3,9 @@ package works.weave.socks.shipping.configuration;
 import io.micrometer.tracing.Span;
 import io.micrometer.tracing.Tracer;
 import io.micrometer.tracing.TraceContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
@@ -18,10 +21,20 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class RabbitMqConfiguration {
 
+    private static final Logger logger = LoggerFactory.getLogger(RabbitMqConfiguration.class);
     final static String queueName = "shipping-task";
 
     @Value("${spring.rabbitmq.host}")
     private String host;
+
+    @Value("${shipping.rabbitmq.connection-timeout-ms:4000}")
+    private int rabbitMqConnectionTimeoutMs;
+
+    @Value("${shipping.rabbitmq.warmup.enabled:true}")
+    private boolean rabbitWarmupEnabled;
+
+    @Value("${shipping.rabbitmq.warmup.fail-fast:false}")
+    private boolean rabbitWarmupFailFast;
 
     @Autowired
     private Tracer tracer;
@@ -29,8 +42,10 @@ public class RabbitMqConfiguration {
     @Bean
     public ConnectionFactory connectionFactory() {
         CachingConnectionFactory connectionFactory = new CachingConnectionFactory(host);
-        connectionFactory.setCloseTimeout(5000);
-        connectionFactory.setConnectionTimeout(5000);
+        connectionFactory.setCloseTimeout(rabbitMqConnectionTimeoutMs);
+        connectionFactory.setConnectionTimeout(rabbitMqConnectionTimeoutMs);
+        connectionFactory.setPublisherConfirmType(CachingConnectionFactory.ConfirmType.CORRELATED);
+        connectionFactory.setPublisherReturns(true);
         connectionFactory.setUsername("guest");
         connectionFactory.setPassword("guest");
         return connectionFactory;
@@ -50,8 +65,8 @@ public class RabbitMqConfiguration {
     public RabbitTemplate rabbitTemplate() {
         RabbitTemplate template = new RabbitTemplate(connectionFactory());
         template.setMessageConverter(jsonMessageConverter());
+        template.setMandatory(true);
 
-        // Micrometer Tracing: publish 前把当前 span 的 trace 信息写到 RabbitMQ headers
         template.setBeforePublishPostProcessors(new MessagePostProcessor() {
             @Override
             public Message postProcessMessage(Message message) {
@@ -68,8 +83,61 @@ public class RabbitMqConfiguration {
                 return message;
             }
         });
+        template.setReturnsCallback(returned ->
+                logger.error(
+                        "RabbitMQ returned message dependency=rabbitmq operation=publish exchange={} routing_key={} reply_code={} reply_text={} error_class=mq_unroutable",
+                        returned.getExchange(),
+                        returned.getRoutingKey(),
+                        returned.getReplyCode(),
+                        returned.getReplyText()
+                )
+        );
+        template.setConfirmCallback((correlationData, ack, cause) -> {
+            if (!ack) {
+                logger.error(
+                        "RabbitMQ publish nack dependency=rabbitmq operation=publish correlation_id={} error_class=mq_nack cause={}",
+                        correlationData != null ? correlationData.getId() : null,
+                        cause
+                );
+            }
+        });
 
         return template;
+    }
+
+    @Bean
+    public ApplicationRunner rabbitStartupWarmup(AmqpAdmin amqpAdmin, RabbitTemplate rabbitTemplate) {
+        return args -> {
+            if (!rabbitWarmupEnabled) {
+                return;
+            }
+
+            long startNanos = System.nanoTime();
+            try {
+                rabbitTemplate.execute(channel -> null);
+                amqpAdmin.initialize();
+                logger.info(
+                        "RabbitMQ warmup completed dependency=rabbitmq operation=startup_warmup host={} queue={} latency_ms={} timeout_ms={}",
+                        host,
+                        queueName,
+                        (System.nanoTime() - startNanos) / 1_000_000,
+                        rabbitMqConnectionTimeoutMs
+                );
+            } catch (RuntimeException exception) {
+                logger.error(
+                        "RabbitMQ warmup failed dependency=rabbitmq operation=startup_warmup host={} queue={} latency_ms={} timeout_ms={} error_class={}",
+                        host,
+                        queueName,
+                        (System.nanoTime() - startNanos) / 1_000_000,
+                        rabbitMqConnectionTimeoutMs,
+                        classifyRabbitWarmupFailure(exception),
+                        exception
+                );
+                if (rabbitWarmupFailFast) {
+                    throw exception;
+                }
+            }
+        };
     }
 
     @Bean
@@ -85,5 +153,23 @@ public class RabbitMqConfiguration {
     @Bean
     Binding binding(Queue queue, TopicExchange exchange) {
         return BindingBuilder.bind(queue).to(exchange).with(queueName);
+    }
+
+    private String classifyRabbitWarmupFailure(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            String simpleName = current.getClass().getSimpleName().toLowerCase();
+            if (simpleName.contains("timeout")) {
+                return "timeout";
+            }
+            if (simpleName.contains("unknownhost")) {
+                return "dns_failure";
+            }
+            if (simpleName.contains("connect")) {
+                return "connection_refused";
+            }
+            current = current.getCause();
+        }
+        return "mq_startup_failure";
     }
 }

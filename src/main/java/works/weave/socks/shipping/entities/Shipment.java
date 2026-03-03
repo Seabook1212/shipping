@@ -1,9 +1,12 @@
 package works.weave.socks.shipping.entities;
 
+import jakarta.validation.constraints.NotBlank;
 import java.util.UUID;
 
 public class Shipment {
     private String id;
+
+    @NotBlank(message = "name must not be blank")
     private String name;
 
     public Shipment() {
