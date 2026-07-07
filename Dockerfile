@@ -21,6 +21,9 @@ COPY ./target/*.jar ./app.jar
 
 RUN	chown -R ${SERVICE_USER}:${SERVICE_GROUP} ./app.jar
 
+RUN mkdir -p /usr/local/byteman/lib \
+ && chown -R ${SERVICE_USER}:${SERVICE_GROUP} /usr/local/byteman
+
 USER ${SERVICE_USER}
 # USER root
 
